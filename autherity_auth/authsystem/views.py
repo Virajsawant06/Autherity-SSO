@@ -2,6 +2,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from django.contrib.auth import authenticate
+from rest_framework.permissions import AllowAny
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from .models import User, DeviceInfo, MasterToken, SessionToken, LoginLog
 from django.utils import timezone
 import uuid
@@ -15,42 +18,65 @@ def get_client_ip(request):
         ip = request.META.get('REMOTE_ADDR')
     return ip
 
+@method_decorator(csrf_exempt, name='dispatch')
 class LoginView(APIView):
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]
 
     def post(self, request):
-        """
-        Login with username/password, generate master token, return it
-        """
         username = request.data.get('username')
         password = request.data.get('password')
-        device_id = request.data.get('device_id')
-        user_agent = request.headers.get('User-Agent', '')
+        device_id = request.data.get('device_id', 'default_device')
 
-        user = authenticate(username=username, password=password)
-        if user is not None:
-            # Get or create device info
-            device, _ = DeviceInfo.objects.get_or_create(
-                device_id=device_id,
-                defaults={
-                    'user_agent': user_agent,
-                    'ip_address': get_client_ip(request)
-                }
-            )
-            # Create MasterToken valid 30 days
-            master_token = MasterToken.objects.create(
-                user=user,
-                device=device,
-                expires_at=timezone.now() + timezone.timedelta(days=30),
-                is_active=True
-            )
-            LoginLog.objects.create(user=user, device=device, ip_address=get_client_ip(request), action='login', success=True)
-            return Response({'master_token': str(master_token.token)}, status=status.HTTP_200_OK)
-        else:
-            return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+        print(f"Login attempt - username: {username}, device_id: {device_id}")
 
+        try:
+            user = authenticate(request, username=username, password=password)
+            
+            if user is not None:
+                # Deactivate old tokens for this device
+                MasterToken.objects.filter(
+                    user=user,
+                    device__device_id=device_id
+                ).update(is_active=False)
+
+                # Generate new token
+                token = uuid.uuid4()
+                expires_at = timezone.now() + timezone.timedelta(days=7)
+                
+                device, _ = DeviceInfo.objects.get_or_create(
+                    user=user,
+                    device_id=device_id
+                )
+                
+                master_token = MasterToken.objects.create(
+                    user=user,
+                    device=device,
+                    token=token,
+                    expires_at=expires_at,
+                    is_active=True
+                )
+
+                return Response({
+                    'master_token': str(token),
+                    'expires_at': expires_at.isoformat()
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response(
+                    {'error': 'Invalid credentials'}, 
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+
+        except Exception as e:
+            print(f"Login error: {str(e)}")
+            return Response(
+                {'error': 'Authentication failed'}, 
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+
+@method_decorator(csrf_exempt, name='dispatch')
 class SSOLoginView(APIView):
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [AllowAny]  # Changed from permissions.AllowAny
 
     def post(self, request):
         """
@@ -58,7 +84,7 @@ class SSOLoginView(APIView):
         """
         master_token_str = request.data.get('master_token')
         device_id = request.data.get('device_id')
-        user_agent = request.headers.get('User-Agent', '')
+        
         if not master_token_str:
             return Response({'error': 'Master token required'}, status=status.HTTP_400_BAD_REQUEST)
         try:
@@ -69,7 +95,7 @@ class SSOLoginView(APIView):
         # Get or create device info for this session
         device, _ = DeviceInfo.objects.get_or_create(
             device_id=device_id,
-            defaults={'user_agent': user_agent, 'ip_address': get_client_ip(request)}
+            defaults={'ip_address': get_client_ip(request)}
         )
         # Create session token valid 1 hour
         session_token = SessionToken.objects.create(
@@ -99,3 +125,22 @@ class LogoutView(APIView):
             return Response({'message': 'Logged out successfully'}, status=status.HTTP_200_OK)
         except SessionToken.DoesNotExist:
             return Response({'error': 'Invalid session token'}, status=status.HTTP_401_UNAUTHORIZED)
+
+class VerifyTokenView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        master_token = request.data.get('master_token')
+        print(f"Verifying token: {master_token}")
+
+        try:
+            token_obj = MasterToken.objects.filter(token=master_token).first()
+            if token_obj and token_obj.is_valid():
+                return Response({
+                    'username': token_obj.user.username,
+                    'valid': True
+                })
+            return Response({'error': 'Invalid or expired token'}, status=401)
+        except Exception as e:
+            print(f"Token verification error: {str(e)}")
+            return Response({'error': 'Invalid token format'}, status=400)

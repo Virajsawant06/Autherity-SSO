@@ -1,0 +1,31 @@
+<script>
+window.onload = function() {
+  const masterToken = document.cookie.split('; ').find(row => row.startsWith('master_token='));
+  const deviceId = document.cookie.split('; ').find(row => row.startsWith('device_id='));
+  if (masterToken && deviceId) {
+    if (confirm("Log in as SSO user?")) {
+      // Send request to backend to proceed with SSO login
+      fetch('/sso-auto-login/', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
+        body: JSON.stringify({
+          master_token: masterToken.split('=')[1],
+          device_id: deviceId.split('=')[1]
+        })
+      }).then(resp => {
+        if (resp.ok) {
+          window.location.href = '/';
+        }
+      });
+    }
+  }
+};
+</script>
+
+<form id="login-form" method="post">
+  {% csrf_token %}
+  <input type="text" name="username" placeholder="Username" required />
+  <input type="password" name="password" placeholder="Password" required />
+  <button type="submit">Log In</button>
+  <p id="error" style="color:red;"></p>
+</form>

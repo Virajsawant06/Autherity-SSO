@@ -1,58 +1,65 @@
-from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
 import uuid
+from django.conf import settings
 
-# Custom User model (optional, but recommended for extensibility)
 class User(AbstractUser):
-    pass  # Use Django's default fields: username, email, password, etc.
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
-# Device info model to track where user logs in from
-class DeviceInfo(models.Model):
-    device_id = models.CharField(max_length=255, unique=True)
-    user_agent = models.CharField(max_length=512, blank=True, null=True)
-    ip_address = models.GenericIPAddressField(blank=True, null=True)
-    location = models.CharField(max_length=255, blank=True, null=True)
-    last_used = models.DateTimeField(auto_now=True)
+    class Meta:
+        db_table = 'authsystem_user'
+        app_label = 'authsystem'
 
     def __str__(self):
-        return self.device_id
+        return self.username
+
+class DeviceInfo(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    device_id = models.CharField(max_length=255)
+    user_agent = models.TextField(null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    location = models.CharField(max_length=255, null=True, blank=True)
+    last_used = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'device_id')
+
+    def __str__(self):
+        return f"Device {self.device_id} for {self.user.username}"
 
 # Master token representing user's core identity for SSO
 class MasterToken(models.Model):
-    token = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    device = models.ForeignKey(DeviceInfo, on_delete=models.SET_NULL, null=True, blank=True)
+    user = models.ForeignKey('User', on_delete=models.CASCADE)
+    device = models.ForeignKey('DeviceInfo', on_delete=models.CASCADE, null=True)
+    token = models.UUIDField(default=uuid.uuid4, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     is_active = models.BooleanField(default=True)
 
-    def save(self, *args, **kwargs):
-        if not self.expires_at:
-            self.expires_at = timezone.now() + timezone.timedelta(days=30)
-        super().save(*args, **kwargs)
+    def is_valid(self):
+        return self.is_active and timezone.now() <= self.expires_at
 
     def __str__(self):
-        return f"MasterToken({self.token}) for User({self.user.username})"
+        return f"{str(self.token)}"
 
 # Session token for a single login session, generated from MasterToken
 class SessionToken(models.Model):
-    token = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    master_token = models.ForeignKey(MasterToken, on_delete=models.CASCADE)
-    device = models.ForeignKey(DeviceInfo, on_delete=models.SET_NULL, null=True, blank=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE
+    )
+    token = models.UUIDField(default=uuid.uuid4, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     is_active = models.BooleanField(default=True)
 
-    def save(self, *args, **kwargs):
-        if not self.expires_at:
-            # Session token valid for 1 hour (adjust as needed)
-            self.expires_at = timezone.now() + timezone.timedelta(hours=1)
-        super().save(*args, **kwargs)
+    def is_valid(self):
+        return self.is_active and timezone.now() <= self.expires_at
 
     def __str__(self):
-        return f"SessionToken({self.token}) for User({self.user.username})"
+        return f"SessionToken({self.token}) for {self.user.username}"
 
 # Logs for auditing login and token usage
 class LoginLog(models.Model):
